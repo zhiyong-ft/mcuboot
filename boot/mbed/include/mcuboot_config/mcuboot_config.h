@@ -10,6 +10,8 @@
 #ifndef __MCUBOOT_CONFIG_H__
 #define __MCUBOOT_CONFIG_H__
 
+#include "hal/watchdog_api.h"
+
 /*
  * For available configurations and their explanations,
  * see mbed_lib.json.
@@ -83,6 +85,7 @@
  */
 #define MCUBOOT_WATCHDOG_FEED()                 \
     do {                                        \
+        hal_watchdog_kick();                    \
     } while (0)
 
 /*

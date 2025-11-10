@@ -194,6 +194,11 @@
             "help": "Size in bytes of a programmable block of the flash memory.",
             "macro_name": "MCUBOOT_BOOT_MAX_ALIGN",
             "value": 8
+        },
+        "watchdog-timeout-ms": {
+            "help": "Watchdog timeout in milliseconds, necessary to restart mcuboot if it hangs.",
+            "macro_name": "MCUBOOT_WATCHDOG_TIMEOUT_MS",
+            "value": 5000
         }
     }
 }

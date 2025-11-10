@@ -23,6 +23,7 @@
 #include "bootutil/bootutil.h"
 #include "bootutil/image.h"
 #include "hal/serial_api.h"
+#include "hal/watchdog_api.h"
 #include "platform/mbed_application.h"
 
 #if (MCUBOOT_CRYPTO_BACKEND == MBEDTLS)
@@ -49,7 +50,9 @@ int default_CSPRNG(uint8_t *dest, unsigned int size) { return 0; }
 
 int main()
 {
-    int rc;
+    watchdog_config_t wdgConfig;
+    wdgConfig.timeout_ms = MCUBOOT_WATCHDOG_TIMEOUT_MS;
+    hal_watchdog_init(&wdgConfig);
 
 #ifdef MCUBOOT_HAVE_LOGGING
     mbed_trace_init();
@@ -59,11 +62,11 @@ int main()
 #endif //MCUBOOT_HAVE_LOGGING
 
     tr_info("Starting MCUboot");
-    
+
 #if (MCUBOOT_CRYPTO_BACKEND == MBEDTLS)
     // Initialize mbedtls crypto for use by MCUboot
     mbedtls_platform_context unused_ctx;
-    rc = mbedtls_platform_setup(&unused_ctx);
+    int rc = mbedtls_platform_setup(&unused_ctx);
     if(rc != 0) {
         tr_error("Failed to setup Mbed TLS, error: %d", rc);
         exit(rc);
