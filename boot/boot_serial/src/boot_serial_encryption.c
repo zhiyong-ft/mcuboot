@@ -11,7 +11,6 @@
 #include "bootutil/bootutil_log.h"
 #include "bootutil/bootutil_public.h"
 #include "bootutil/fault_injection_hardening.h"
-#include "bootutil/enc_key.h"
 
 #include "mcuboot_config/mcuboot_config.h"
 
@@ -20,33 +19,32 @@
 BOOT_LOG_MODULE_DECLARE(serial_encryption);
 
 fih_ret
-boot_image_validate_encrypted(const struct flash_area *fa_p,
+boot_image_validate_encrypted(struct boot_loader_state *state,
+                              const struct flash_area *fa_p,
                               struct image_header *hdr, uint8_t *buf,
                               uint16_t buf_size)
 {
     FIH_DECLARE(fih_rc, FIH_FAILURE);
 
-    struct boot_loader_state boot_data;
-    struct boot_loader_state *state = &boot_data;
     struct boot_status _bs;
     struct boot_status *bs = &_bs;
-    uint8_t image_index;
     int rc;
 
-    memset(&boot_data, 0, sizeof(struct boot_loader_state));
-    image_index = BOOT_CURR_IMG(state);
-    if(IS_ENCRYPTED(hdr)) {
-        rc = boot_enc_load(BOOT_CURR_ENC(state), 1, hdr, fa_p, bs);
+    if (MUST_DECRYPT(fa_p, BOOT_CURR_IMG(state), hdr)) {
+        rc = boot_enc_load(state, BOOT_SLOT_SECONDARY, hdr, fa_p, bs);
         if (rc < 0) {
             FIH_RET(fih_rc);
         }
-        rc = boot_enc_set_key(BOOT_CURR_ENC(state), 1, bs);
+        rc = boot_enc_set_key(BOOT_CURR_ENC_SLOT(state, BOOT_SLOT_SECONDARY), bs->enckey[BOOT_SLOT_SECONDARY]);
         if (rc < 0) {
             FIH_RET(fih_rc);
         }
     }
-    FIH_CALL(bootutil_img_validate, fih_rc, BOOT_CURR_ENC(state), image_index,
+
+    FIH_CALL(bootutil_img_validate, fih_rc, state,
              hdr, fa_p, buf, buf_size, NULL, 0, NULL);
+
+    boot_enc_zeroize(BOOT_CURR_ENC(state));
 
     FIH_RET(fih_rc);
 }
@@ -113,7 +111,7 @@ done:
  * @return                      0 on success; nonzero on failure.
  */
 static int
-decrypt_region_inplace(struct boot_loader_state *state,
+decrypt_region_inplace(struct enc_data *enc_data,
                        const struct flash_area *fap,
                        struct image_header *hdr,
                        uint32_t off, uint32_t sz)
@@ -125,11 +123,8 @@ decrypt_region_inplace(struct boot_loader_state *state,
     size_t blk_off;
     uint16_t idx;
     uint32_t blk_sz;
-    int slot = flash_area_id_to_multi_image_slot(BOOT_CURR_IMG(state),
-                                                 flash_area_get_id(fap));
     uint8_t buf[sz] __attribute__((aligned));
     assert(sz <= sizeof buf);
-    assert(slot >= 0);
 
     bytes_copied = 0;
     while (bytes_copied < sz) {
@@ -171,11 +166,11 @@ decrypt_region_inplace(struct boot_loader_state *state,
                     blk_sz = tlv_off - (off + bytes_copied);
                 }
             }
-            boot_enc_decrypt(BOOT_CURR_ENC(state), slot,
+            boot_enc_decrypt(enc_data,
                     (off + bytes_copied + idx) - hdr->ih_hdr_size, blk_sz,
                     blk_off, &buf[idx]);
         }
-        rc = flash_area_erase(fap, off + bytes_copied, chunk_sz);
+        rc = boot_erase_region(fap, off + bytes_copied, chunk_sz, false);
         if (rc != 0) {
             return BOOT_EFLASH;
         }
@@ -219,43 +214,45 @@ decrypt_image_inplace(const struct flash_area *fa_p,
     size_t sect_count;
     size_t sect;
     struct flash_sector sector;
+    struct enc_key_data enc_data;
 
-    memset(&boot_data, 0, sizeof(struct boot_loader_state));
+    boot_state_clear(state);
     memset(&_bs, 0, sizeof(struct boot_status));
 
     /* Get size from last sector to know page/sector erase size */
     rc = flash_area_get_sector(fa_p, boot_status_off(fa_p), &sector);
 
-
     if(IS_ENCRYPTED(hdr)) {
 #if 0 //Skip this step?, the image will just not boot if it's not decrypted properly
         static uint8_t tmpbuf[BOOT_TMPBUF_SZ];
          /* First check if the encrypted image is a good image before decrypting */
-        FIH_CALL(boot_image_validate_encrypted,fih_rc,fa_p,&_hdr,tmpbuf,BOOT_TMPBUF_SZ);
+        FIH_CALL(boot_image_validate_encrypted, fih_rc, state, fa_p, &_hdr, tmpbuf, BOOT_TMPBUF_SZ);
         if (FIH_NOT_EQ(fih_rc, FIH_SUCCESS)) {
              FIH_RET(fih_rc);
         }
 #endif
-        memset(&boot_data, 0, sizeof(struct boot_loader_state));
         /* Load the encryption keys into cache */
-        rc = boot_enc_load(BOOT_CURR_ENC(state), 0, hdr, fa_p, bs);
+        rc = boot_enc_load(state, BOOT_SLOT_PRIMARY, hdr, fa_p, bs);
         if (rc < 0) {
-            FIH_RET(fih_rc);
+            goto total_out;
         }
-        if (rc == 0 && boot_enc_set_key(BOOT_CURR_ENC(state), 0, bs)) {
-            FIH_RET(fih_rc);
+
+        boot_enc_init(&enc_data);
+
+        if (rc == 0 && boot_enc_set_key(&enc_data, bs->enckey[BOOT_SLOT_PRIMARY])) {
+            goto total_out;
         }
     }
     else
     {
         /* Expected encrypted image! */
-        FIH_RET(fih_rc);
+        goto total_out;
     }
 
     uint32_t src_size = 0;
     rc = read_image_size(fa_p,hdr, &src_size);
     if (rc != 0) {
-        FIH_RET(fih_rc);
+        goto total_out;
     }
 
     /* TODO: This assumes every sector has an equal size, should instead use
@@ -265,7 +262,7 @@ decrypt_image_inplace(const struct flash_area *fa_p,
     sect_size = sector.fs_size;
     sect_count = fa_p->fa_size / sect_size;
     for (sect = 0, size = 0; size < src_size && sect < sect_count; sect++) {
-        rc = decrypt_region_inplace(state, fa_p,hdr, size, sect_size);
+        rc = decrypt_region_inplace(enc_data, fa_p, hdr, size, sect_size);
         if (rc != 0) {
             FIH_RET(fih_rc);
         }
@@ -273,6 +270,9 @@ decrypt_image_inplace(const struct flash_area *fa_p,
     }
 
     fih_rc = FIH_SUCCESS;
+total_out:
+    boot_enc_zeorize(&enc_data);
+    boot_state_clear(&state);
     FIH_RET(fih_rc);
 }
 

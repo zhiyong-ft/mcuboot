@@ -104,20 +104,54 @@ struct image_tlv {
 /*
  * Image trailer TLV types.
  */
-#define IMAGE_TLV_KEYHASH           0x01   /* hash of the public key */
-#define IMAGE_TLV_SHA256            0x10   /* SHA256 of image hdr and body */
-#define IMAGE_TLV_RSA2048_PSS       0x20   /* RSA2048 of hash output */
-#define IMAGE_TLV_ECDSA224          0x21   /* ECDSA of hash output - Not supported anymore */
-#define IMAGE_TLV_ECDSA_SIG         0x22   /* ECDSA of hash output */
-#define IMAGE_TLV_RSA3072_PSS       0x23   /* RSA3072 of hash output */
-#define IMAGE_TLV_ED25519           0x24   /* ED25519 of hash output */
-#define IMAGE_TLV_ENC_RSA2048       0x30   /* Key encrypted with RSA-OAEP-2048 */
-#define IMAGE_TLV_ENC_KW            0x31   /* Key encrypted with AES-KW-128 or
-                                              256 */
-#define IMAGE_TLV_ENC_EC256         0x32   /* Key encrypted with ECIES-P256 */
-#define IMAGE_TLV_ENC_X25519        0x33   /* Key encrypted with ECIES-X25519 */
-#define IMAGE_TLV_DEPENDENCY        0x40   /* Image depends on other image */
-#define IMAGE_TLV_SEC_CNT           0x50   /* security counter */
+#define IMAGE_TLV_KEYHASH           0x01    /* hash of the public key */
+#define IMAGE_TLV_PUBKEY            0x02    /* public key */
+#define IMAGE_TLV_SHA256            0x10    /* SHA256 of image hdr and body */
+#define IMAGE_TLV_SHA384            0x11    /* SHA384 of image hdr and body */
+#define IMAGE_TLV_SHA512            0x12    /* SHA512 of image hdr and body */
+#define IMAGE_TLV_RSA2048_PSS       0x20    /* RSA2048 of hash output */
+#define IMAGE_TLV_ECDSA224          0x21    /* ECDSA of hash output - Not supported anymore */
+#define IMAGE_TLV_ECDSA_SIG         0x22    /* ECDSA of hash output */
+#define IMAGE_TLV_RSA3072_PSS       0x23    /* RSA3072 of hash output */
+#define IMAGE_TLV_ED25519           0x24    /* ed25519 of hash output */
+#define IMAGE_TLV_SIG_PURE          0x25    /* Indicator that attached signature has been prepared
+                                             * over image rather than its digest.
+                                             */
+#define IMAGE_TLV_ENC_RSA2048       0x30    /* Key encrypted with RSA-OAEP-2048 */
+#define IMAGE_TLV_ENC_KW            0x31    /* Key encrypted with AES-KW 128 or 256*/
+#define IMAGE_TLV_ENC_EC256         0x32    /* Key encrypted with ECIES-EC256 */
+#define IMAGE_TLV_ENC_X25519        0x33    /* Key encrypted with ECIES-X25519 */
+#define IMAGE_TLV_ENC_X25519_SHA512 0x34    /* Key exchange using ECIES-X25519 and SHA512 for MAC
+                                             * tag and HKDF in key derivation process
+                                             */
+#define IMAGE_TLV_DEPENDENCY        0x40    /* Image depends on other image */
+#define IMAGE_TLV_SEC_CNT           0x50    /* security counter */
+#define IMAGE_TLV_BOOT_RECORD       0x60    /* measured boot record */
+/* The following flags relate to compressed images and are for the decompressed image data */
+#define IMAGE_TLV_DECOMP_SIZE       0x70    /* Decompressed image size excluding header/TLVs */
+#define IMAGE_TLV_DECOMP_SHA        0x71    /*
+                                             * Decompressed image shaX hash, this field must match
+                                             * the format and size of the raw slot (compressed)
+                                             * shaX hash
+                                             */
+#define IMAGE_TLV_DECOMP_SIGNATURE  0x72    /*
+                                             * Decompressed image signature, this field must match
+                                             * the format and size of the raw slot (compressed)
+                                             * signature
+                                             */
+#define IMAGE_TLV_COMP_DEC_SIZE     0x73    /* Compressed decrypted image size */
+                                            /*
+                                             * vendor reserved TLVs at xxA0-xxFF,
+                                             * where xx denotes the upper byte
+                                             * range.  Examples:
+                                             * 0x00a0 - 0x00ff
+                                             * 0x01a0 - 0x01ff
+                                             * 0x02a0 - 0x02ff
+                                             * ...
+                                             * 0xffa0 - 0xfffe
+                                             */
+#define IMAGE_TLV_UUID_VID          0x80    /* Vendor unique identifier */
+#define IMAGE_TLV_UUID_CID          0x81    /* Device class unique identifier */
 ```
 
 Optional type-length-value records (TLVs) containing image metadata are placed
@@ -133,6 +167,14 @@ case the value of the `ih_protect_tlv_size` field is 0.
 The `ih_hdr_size` field indicates the length of the header, and therefore the
 offset of the image itself.  This field provides for backwards compatibility in
 case of changes to the format of the image header.
+
+## [TLV allow list](#tlv-allow)
+
+While reading unprotected TLVs from an image, MCUboot will try to match TLVs
+against list it has compiled in support for; each new defined TLV has to be added
+to that list, which is named `allowed_unprot_tlvs` and defined in
+image_validate.c. The usage of the list is optional and can be controlled
+during compilation with `MCUBOOT_USE_TLV_ALLOW_LIST` config identifier.
 
 ## [Flash map](#flash-map)
 
@@ -180,6 +222,9 @@ overwrite-based image upgrades, but must be configured at build time to choose
 one of these two strategies.
 
 ### [Swap using scratch](#image-swap-using-scratch)
+
+Please note that the swap-using-scratch algorithm may be removed in the coming
+future.
 
 When swap-using-scratch algorithm is used, in addition to the slots of
 image areas, the bootloader requires a scratch area to allow for reliable
@@ -235,7 +280,51 @@ Where:
   `image-slot-size` is the size of the image slot.
   `image-trailer-size` is the size of the image trailer.
 
-### [Swap without using scratch](#image-swap-no-scratch)
+### [Swap using offset (without using scratch)](#image-swap-offset-no-scratch)
+
+This algorithm is an alternative to the swap-using-scratch algorithm and an
+enhancement of the swap using move algorithm.
+It uses an additional sector in the secondary slot to make swap possible.
+The algorithm works as follows:
+
+  1.	Update image must be placed starting at the second sector in the secondary slot
+  2.	Copies the N-th sector from the primary slot to the N-th sector of the
+  secondary slot.
+  3.	Copies the (N+1)-th sector from the secondary slot to the N-th sector of the
+  primary slot.
+  4.	Repeats steps 2. and 3. until all the slots' sectors are swapped.
+
+This algorithm is designed so that the lower sector of the secondary slot is
+used only for allowing sectors to move down during a swap. Therefore the most
+memory-size-effective slot layout is when the secondary slot is larger than
+the primary slot by exactly one sector, although same-sized slots are allowed
+as well. The algorithm is limited to support sectors of the same sector layout.
+All slot's sectors should be of the same size. This algorithm uses 2 flags per
+sector update rather than the 3 flags used by swap using move, which requires
+a smaller swap status area size.
+
+When using this algorithm the maximum image size available for the application
+will be:
+```
+maximum-image-size1 = N * slot-sector-size - image-trailer-sectors-size
+```
+
+Where:
+  `N` is the number of sectors in the primary slot.
+  `image-trailer-sectors-size` is the size of the image trailer rounded up to
+  the total size of sectors its occupied. For instance if the image-trailer-size
+  is equal to 1056 B and the sector size is equal to 1024 B, then
+  `image-trailer-sectors-size` will be equal to 2048 B.
+
+The algorithm does one erase cycle on both the primary and secondary slots
+during each swap.
+
+The algorithm is enabled using the `MCUBOOT_SWAP_USING_OFFSET` option.
+
+### [Swap using move (without using scratch)](#image-swap-no-scratch)
+
+Please note that the swap-using-offset algorithm is preferred over swap-using-move
+except when building for existing products already using the latter.
 
 This algorithm is an alternative to the swap-using-scratch algorithm.
 It uses an additional sector in the primary slot to make swap possible.
@@ -271,6 +360,12 @@ Where:
   is equal to 1056 B and the sector size is equal to 1024 B, then
   `image-trailer-sectors-size` will be equal to 2048 B.
 
+This does imply, if there is any doubt, that the primary slot will be exactly
+one sector larger than the secondary slot due to the swap sector alone. It is
+the case that both the primary and secondary slots both have a trailer in
+addition to the application payload and these trailers are identical in size
+to one another.
+
 The algorithm does two erase cycles on the primary slot and one on the secondary
 slot during each swap. Assuming that receiving a new image by the DFU
 application requires 1 erase cycle on the secondary slot, this should result in
@@ -296,7 +391,7 @@ image. After a successful validation of the selected image the bootloader
 chain-loads it.
 
 An additional "revert" mechanism is also supported. For more information, please
-read the [corresponding section](#direct-xip-revert).
+read the [corresponding section](#direct-xip-ram-load-revert).
 Handling the primary and secondary slots as equals has its drawbacks. Since the
 images are not moved between the slots, the on-the-fly image
 encryption/decryption can't be supported (it only applies to storing the image
@@ -350,6 +445,11 @@ the image is checked for encryption. If the image is not encrypted, RAM loading
 happens as described above. If the image is encrypted, it is copied in RAM at
 the provided address and then decrypted. Finally, the decrypted image is
 authenticated in RAM and executed.
+
+Similar to direct-xip, ram-load mode also supports a "revert" mechanism.
+This mechanism works in the same manner as the direct-xip revert mechanism does,
+so please see the [corresponding section](#direct-xip-ram-load-revert) for
+more details.
 
 ## [Boot swap types](#boot-swap-types)
 
@@ -406,19 +506,22 @@ The "swap type" is a high-level representation of the outcome of the
 boot. Subsequent sections describe how MCUboot determines the swap type from
 the bit-level contents of flash.
 
-### [Revert mechanism in direct-xip mode](#direct-xip-revert)
+### [Revert mechanism in direct-xip and ram-load mode](#direct-xip-ram-load-revert)
 
-The direct-xip mode also supports a "revert" mechanism which is the equivalent
-of the swap mode's "revert" swap. When the direct-xip mode is selected it can be
-enabled with the MCUBOOT_DIRECT_XIP_REVERT config option and an image trailer
-must also be added to the signed images (the "--pad" option of the `imgtool`
-script must be used). For more information on this please read the
-[Image Trailer](#image-trailer) section and the [imgtool](imgtool.md)
-documentation. Making the images permanent (marking them as confirmed in
-advance) is also supported just like in swap mode. The individual steps of the
-direct-xip mode's "revert" mechanism are the following:
+The direct-xip and ram-load modes also support a "revert" mechanism which is the
+equivalent of the swap mode's "revert" swap. When the direct-xip mode is
+selected it can be enabled with the `MCUBOOT_DIRECT_XIP_REVERT` config option.
+In ram-load mode, the feature is enabled with `MCUBOOT_RAM_LOAD_REVERT` config
+option.  Note that an image trailer must also be added to the signed images (the
+"--pad" option of the `imgtool` script must be used). Otherwise, MCUboot will
+not recognize the image as valid and will attempt to revert it. For more
+information on this please read the [Image Trailer](#image-trailer) section and
+the [imgtool](imgtool.md) documentation. Making the images permanent (marking
+them as confirmed in advance) is also supported just like in swap mode. The
+individual steps of this "revert" mechanism are the following:
 
-1. Select the slot which holds the newest potential image.
+1. Select the slot which holds the newest potential image, based on the
+   version number
 2. Was the image previously selected to run (during a previous boot)?
     + Yes: Did the image mark itself "OK" (was the self-test successful)?
         + Yes.
@@ -468,6 +571,12 @@ image trailer. An image trailer has the following structure:
     |                    0xff padding as needed                     |
     |        (BOOT_MAX_ALIGN minus 4 octets from Swap size)         |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |   Unprotected TLV size [*2]   |   Unprotected TLV size [*2]   |
+    |   Secondary slot (2 octets)   |    Primary slot (2 octets)    |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+    |                  0xff padding as needed [*2]                  |
+    |  (BOOT_MAX_ALIGN minus 4 octets from unprotected TLV sizes)   |
+    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     |   Swap info   |  0xff padding (BOOT_MAX_ALIGN minus 1 octet)  |
     +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
     |   Copy done   |  0xff padding (BOOT_MAX_ALIGN minus 1 octet)  |
@@ -483,6 +592,7 @@ image trailer. An image trailer has the following structure:
 ```
 
 [*]: Only present if the encryption option is enabled (`MCUBOOT_ENC_IMAGES`).
+[*2]: Only present if swap using offset mode is used (`MCUBOOT_SWAP_USING_OFFSET`).
 
 The offset immediately following such a record represents the start of the next
 flash area.
@@ -633,7 +743,17 @@ types described above via a set of tables.  These tables are reproduced below.
 ---
 
 ```
-    State I
+    State I (swap using offset only)
+                     | primary slot | secondary slot |
+    -----------------+--------------+----------------|
+               magic | Any          | Good           |
+            image-ok | Any          | Unset          |
+           copy-done | Any          | Set            |
+    -----------------+--------------+----------------'
+     result: BOOT_SWAP_TYPE_REVERT                   |
+    -------------------------------------------------'
+
+    State II
                      | primary slot | secondary slot |
     -----------------+--------------+----------------|
                magic | Any          | Good           |
@@ -644,7 +764,7 @@ types described above via a set of tables.  These tables are reproduced below.
     -------------------------------------------------'
 
 
-    State II
+    State III
                      | primary slot | secondary slot |
     -----------------+--------------+----------------|
                magic | Any          | Good           |
@@ -655,7 +775,7 @@ types described above via a set of tables.  These tables are reproduced below.
     -------------------------------------------------'
 
 
-    State III
+    State IV
                      | primary slot | secondary slot |
     -----------------+--------------+----------------|
                magic | Good         | Any            |
@@ -672,7 +792,7 @@ Otherwise, MCUboot does not attempt to swap images, resulting in one of the
 other three swap types, as illustrated by State IV.
 
 ```
-    State IV
+    State V
                      | primary slot | secondary slot |
     -----------------+--------------+----------------|
                magic | Any          | Any            |
@@ -685,7 +805,7 @@ other three swap types, as illustrated by State IV.
     -------------------------------------------------'
 ```
 
-In State IV, when no errors occur, MCUboot will attempt to boot the contents of
+In State V, when no errors occur, MCUboot will attempt to boot the contents of
 the primary slot directly, and the result is `BOOT_SWAP_TYPE_NONE`. If the image
 in the primary slot is not valid, the result is `BOOT_SWAP_TYPE_FAIL`. If a
 fatal error occurs during boot, the result is `BOOT_SWAP_TYPE_PANIC`. If the
@@ -977,7 +1097,10 @@ the middle of an image swap operation.  The swap status region consists of a
 series of single-byte records.  These records are written independently, and
 therefore must be padded according to the minimum write size imposed by the
 flash hardware.  The structure of the swap status region is illustrated below.
-In this figure, a min-write-size of 1 is assumed for simplicity.
+In this figure, a min-write-size of 1 is assumed for simplicity, this diagram
+shows 3 states per sector which is applicable to swap using scratch and swap
+using move, however in swap using offset mode there are only 2 states per
+sector and the overall state size required is less.
 
 ```
      0                   1                   2                   3
@@ -1038,14 +1161,15 @@ values map to the above four states as follows
 
 The swap status region can accommodate `BOOT_MAX_IMG_SECTORS` sector indices.
 Hence, the size of the region, in bytes, is
-`BOOT_MAX_IMG_SECTORS * min-write-size * 3`. The only requirement for the index
-count is that it is great enough to account for a maximum-sized image
-(i.e., at least as great as the total sector count in an image slot).  If a
-device's image slots have been configured with `BOOT_MAX_IMG_SECTORS: 128` and
-use less than 128 sectors, the first record that gets written will be somewhere
-in the middle of the region. For example, if a slot uses 64 sectors, the first
-sector index that gets swapped is 63, which corresponds to the exact halfway
-point within the region.
+`BOOT_MAX_IMG_SECTORS * min-write-size * s` where `s` is 3 for swap using
+scratch and swap using move modes, and is 2 for swap using offset mode. The
+only requirement for the index count is that it is great enough to account
+for a maximum-sized image (i.e., at least as great as the total sector count in
+an image slot).  If a device's image slots have been configured with
+`BOOT_MAX_IMG_SECTORS: 128` and use less than 128 sectors, the first record
+that gets written will be somewhere in the middle of the region. For example,
+if a slot uses 64 sectors, the first sector index that gets swapped is 63,
+which corresponds to the exact halfway point within the region.
 
 ---
 ***Note***
